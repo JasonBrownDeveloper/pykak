@@ -30,36 +30,39 @@ import sys
 import os
 import socket
 
+from dataclasses import dataclass
 
-def init(session):
-    global socket_path
-    socket_path = _get_socket_path(session)
+@dataclass(frozen=True)
+class KakSocket:
+    socket_path: str
 
+    @staticmethod
+    def init(session: str):
+        socket_path = _get_socket_path(session)
+        return KakSocket(socket_path=socket_path)
 
-def send_cmd(cmd: str) -> bool:
-    """
-    Send a command string to the Kakoune session. Sent data is a
-    concatenation of:
-       - Header
-         - Magic byte indicating type is "command" (\x02)
-         - Length of whole message in uint32
-       - Content
-         - Length of command string in uint32
-         - Command string
-    Return whether the communication was successful.
-    """
-    b_cmd = cmd.encode('utf-8')
-    sock = socket.socket(socket.AF_UNIX)
-    sock.connect(socket_path)
-    b_content = _encode_length(len(b_cmd)) + b_cmd
-    b_header = b'\x02' + _encode_length(len(b_content) + 5)
-    b_message = b_header + b_content
-    return sock.send(b_message) == len(b_message)
-
+    def send(self, cmd: str) -> bool:
+        """
+        Send a command string to the Kakoune session. Sent data is a
+        concatenation of:
+           - Header
+             - Magic byte indicating type is "command" (\x02)
+             - Length of whole message in uint32
+           - Content
+             - Length of command string in uint32
+             - Command string
+        Return whether the communication was successful.
+        """
+        b_cmd = cmd.encode('utf-8')
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.connect(self.socket_path)
+            b_content = _encode_length(len(b_cmd)) + b_cmd
+            b_header = b'\x02' + _encode_length(len(b_content) + 5)
+            b_message = b_header + b_content
+            return sock.send(b_message) == len(b_message)
 
 def _encode_length(str_length: int) -> bytes:
     return str_length.to_bytes(4, byteorder=sys.byteorder)
-
 
 def _get_socket_path(session: str) -> str:
     xdg_runtime_dir = os.environ.get('XDG_RUNTIME_DIR')

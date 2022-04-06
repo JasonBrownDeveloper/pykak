@@ -1,100 +1,49 @@
-decl str pk_interpreter python3
+def sh-bg -params 1 %{
+    nop %sh{
+        export kak_session
+        (
+            {
+                eval "$1"
+            } &
+        ) >/dev/null 2>&1 </dev/null
+    }
+}
 
-decl -hidden str pk_source %val{source}
-decl -hidden bool pk_running false
+sh-bg %{
+    python -u -c 'if 1:
+        import libpykak as k
+        import functools
+        import textwrap
 
-def pk_start -docstring "start pykak server" %{
-    alias global pk_init_false nop
-    try %{
-        "pk_init_%opt{pk_running}"
-        eval %sh{
-            # variable export: kak_session
-            set -e
-            trap 'rm -rf "$pk_dir"' EXIT
-            pk_dir="$(mktemp -d -t pykak_XXXXXX)"
-            mkfifo "$pk_dir/kak2py_a.fifo"
-            mkfifo "$pk_dir/kak2py_b.fifo"
-            mkfifo "$pk_dir/py2kak.fifo"
-            pykak_py="$(dirname $kak_opt_pk_source)/pykak.py"
-            export PYKAK_DIR="$pk_dir"
-            export KAK_PID="$PPID"
-            "$kak_opt_pk_interpreter" "$pykak_py"
-            trap - EXIT
+        @functools.lru_cache(maxsize=128)
+        def _compile_code(code: str):
+            return compile(code, "<string>", "exec")
+
+        api = """
+            opt optq
+            reg regq
+            val valq
+            k  keval
+            ka keval_async
+            quote
+            unquote
+        """.split()
+
+        Globals = {
+            name: getattr(k, name)
+            for name in api
         }
-    }
-    unalias global pk_init_false
-}
 
-def pk_stop -docstring "stop pykak server" %{
-    alias global pk_init_true nop
-    try %{
-        "pk_init_%opt{pk_running}"
-        pk_write f
-        rmhooks global pykak
-        set global pk_running false
-    }
-    unalias global pk_init_true
-}
+        Globals["pk_send"] = k.pk_send()
 
-def pk_restart -docstring "restart pykak server" %{
-    pk_stop
-    pk_start
-}
+        @k.cmd
+        def python(*args):
+            "evaluate in python"
+            args = list(args)
+            code = args.pop()
+            code = textwrap.dedent(code)
+            exec(_compile_code(code), Globals, {"args": args})
 
-def -hidden -override pk_read_1 %{
-    try %{
-        pk_read_impl
-        try pk_done catch %{
-            pk_write a
-        }
-    } catch %{
-        pk_write "e%val{error}"
-    }
+        k.keval_async("alias global py python")
+    '
 }
-
-def pk_write -hidden -params 1 %{
-    alias global "pk_%opt{kak2py_state}" nop
-    try %{
-        pk_true
-        unalias global pk_true
-        set global kak2py_state false
-        echo -to-file "%opt{pk_dir}/kak2py_a.fifo" %arg{1}
-    } catch %{
-        unalias global pk_false
-        set global kak2py_state true
-        echo -to-file "%opt{pk_dir}/kak2py_b.fifo" %arg{1}
-    }
-}
-def pk_write_quoted -hidden -params 1.. %{
-    alias global "pk_%opt{kak2py_state}" nop
-    try %{
-        pk_true
-        unalias global pk_true
-        set global kak2py_state false
-        echo -to-file "%opt{pk_dir}/kak2py_a.fifo" \
-            -quoting kakoune %arg{@}
-    } catch %{
-        unalias global pk_false
-        set global kak2py_state true
-        echo -to-file "%opt{pk_dir}/kak2py_b.fifo" \
-            -quoting kakoune %arg{@}
-    }
-}
-
-def pk_send -params 1.. -docstring "send data to python" %{
-    pk_write "d%arg{@}"
-}
-
-def pk_sendq -params 1.. -docstring "send quoted data to python" %{
-    pk_write_quoted d %arg{@}
-}
-
-def python -docstring "run python code" -params 1.. %{
-    pk_start
-
-    pk_write_quoted r %arg{@}
-
-    pk_read_inf
-    unalias global pk_done
-}
-alias global py python

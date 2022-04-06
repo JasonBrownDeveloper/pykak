@@ -14,22 +14,25 @@ On a Ryzen 5950x, an empty `%sh{}` call takes 1.75ms and an empty `python %{}` c
 - Speed
 - Minimalism
 - Automatic resource cleanup
+- Providing isolation between plugins
 
 ### Non-goals
 - Completely replacing kakscript
 - Providing a python interface for every Kakoune command
 - Managing plugin behavior
-- Providing isolation between plugins
 
 ### System requirements
 - Kakoune v2019.07.01+ (needed for `echo -to-file`)
 - Python 3
 
 ## Installation
+
+<!--
 If using `plug.kak`:
 ```
 plug 'tomKPZ/pykak'
 ```
+-->
 
 Otherwise, clone the repo and add the following to your `kakrc`:
 ```
@@ -37,15 +40,8 @@ source /path/to/pykak/pykak.kak
 ```
 
 ### Configuration
-`pk_interpreter`: Specify which python interpreter to use.  Defaults to `python3` if not specified.  `pypy3` works, but is not recommended since it doesn't seem to provide any speedup for pykak.
 
-The pykak server will be lazy-loaded on the first call to `python`.  You can also manually start the server with `pk_start`.
-
-Example configuration:
-```
-set global pk_interpreter python3 # Optional. pypy3 also works, but is not recommended.
-pk_start # optional
-```
+The pykak server will be lazy-loaded on the first call to `python`.
 
 ## Usage
 
@@ -133,12 +129,14 @@ Pykak supports running Kakoune commands asynchronously via Kakoune's socket.
 
 `keval_async(cmds, client=None)`: Evaluate `cmds` in Kakoune.  `cmds` is allowed to contain a `python` command.  If `client` is given, `cmds` will be executed in the context of that client.  You can also use `ka()` which is aliased to `keval_async()`.
 
-`keval_async` may be called from any thread.  Communication with Kakoune (via `keval()` or similar) is only allowed on the main thread while Kakoune is servicing a `python` command.
+`keval_async` may be called from any thread.  Communication with Kakoune (via `keval()` or similar) is only allowed on the serving thread on which Kakoune is servicing a `python` command.
 
 ```python
 python %{
+    import threading
     def foo(client):
-        time.sleep(2)
+        import time
+        time.sleep(1)
         keval_async('echo hello world', client)
     threading.Thread(target=foo, args=[val('client')]).start()
 }
@@ -147,23 +145,25 @@ python %{
 ### Raw IO
 Raw IO may be useful to batch multiple IOs together, or to send data for each buffer with `eval -buffer *`.
 
-`pk_send data` and `pk_sendq data`: Sends `data` from Kakoune to python.  The `q` variant sends the data quoted.  It only makes sense to run these commands during a `keval` since that's the only way to obtain the data, otherwise the data will be discarded.  `keval` returns a list of data sent from these commands.
+`pk_send data`: Sends `data` from Kakoune to python.  It only makes sense to run these commands during a `keval` since that's the only way to obtain the data, otherwise the data will be discarded.  `keval` returns a list of data sent from these commands.
 
 ```python
 python %{
-    replies = keval('''
-       pk_send hello world
-       pk_sendq hello world
+    replies = keval(f'''
+       {pk_send} hello world
     ''')
     keval('echo ' + quote(str(replies)))
 }
 ```
-Output: `['hello world', ['hello', 'world']]`.
+Output: `[['hello', 'world']]`.
 
 ```python
 python %{
-    buffers = keval('eval -buffer * %{ pk_send %val{buf_line_count} }')
-    keval('echo ' + quote(buffers))
+    buf_line_counts = [
+        xs[0]
+        for xs in keval(f'eval -buffer * %({pk_send} %val(buf_line_count))')
+    ]
+    keval('echo ' + quote(' '.join(buf_line_counts)))
 }
 ```
 Possible output: `152 234`.
@@ -242,7 +242,7 @@ See [counted.kak](https://github.com/tomKPZ/counted.kak) for an example of a plu
 For synchronous communication, 3 fifos (named pipes) are used to communicate between Kakoune and Python.  In the Kakoune->Python direction, 2 pipes are used in an alternating fashion to avoid a race condition.  Otherwise, 2 requests from Kakoune sent back-to-back may appear as a single request to Python.  Using 2 fifos forces synchronization.  In the Python->Kakoune direction, only one fifo is used because it's not possible to write 2 responses from Python without a read in between to force synchronization.
 
 On `py2kak.fifo`, only kakscript commands are sent.  On `kak2py_a.fifo` and `kak2py_b.fifo`, requests are sent with a simple protocol where the first character defines the request type:
-- `r`: request (python code to run)
+- `c`: call request (stored python function to call)
 - `d`: data
 - `e`: error
 - `f`: kakoune is exiting
@@ -252,8 +252,7 @@ On `py2kak.fifo`, only kakscript commands are sent.  On `kak2py_a.fifo` and `kak
 For asynchronous communication, Kakoune's socket is used to send kakscript commands.  Data only flows from Python to Kakoune on the socket.  The socket code is provided by [kakoune-smooth-scroll](https://github.com/caksoylar/kakoune-smooth-scroll).
 
 Three threads are used in python:
-- Main thread: Handles synchronous communication in a loop.  Executes code sent from Kakoune.
-- Socket thread: Pulls async requests from a queue and sends them on Kakoune's socket.
+- Serving thread: Handles synchronous communication in a loop.  Executes code sent from Kakoune.
 - Exit thread: On exit, Kakoune will send a request to Python so it can cleanup resources.  But if Kakoune crashes, the exit thread will detect that.  The strategy used is different depending on the platform:
   - Linux 5.3+: `pidfd`
   - MacOS and BSD: `kqueue`
