@@ -108,6 +108,11 @@ class KakConnection:
     kak_pid: int
 
     callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
+    _next_unique: int = 0
+
+    def unique(self):
+        self._next_unique += 1
+        return self._next_unique - 1
 
     serving_thread: Thread = cast(Any, None)
 
@@ -133,7 +138,6 @@ class KakConnection:
 
     def keval(self, response: str) -> list[list[str]]:
         assert threading.current_thread() == self.serving_thread
-        print(response, flush=True)
         self.write(response)
         replies: list[list[str]] = []
         while True:
@@ -280,9 +284,12 @@ class KakConnection:
 def init(kak_session: str):
     return KakConnection.init(kak_session)
 
+def instance():
+    return KakConnection.instance()
+
 def getter(prefix: str):
     def getter_impl(name: str):
-        conn = KakConnection.instance()
+        conn = instance()
         return conn.keval(f'{conn.pk_write} d %{prefix}({name})')[0]
     return getter_impl
 
@@ -292,11 +299,11 @@ def getter1(prefix: str):
     return getter_impl
 
 def keval(script: str):
-    conn = KakConnection.instance()
+    conn = instance()
     return conn.keval(script)
 
 def keval_async(script: str, client: Union[None, str] = None):
-    conn = KakConnection.instance()
+    conn = instance()
     conn.keval_async(script, client=client)
 
 opt = getter1('opt')
@@ -309,7 +316,7 @@ k = keval
 ka = keval_async
 
 def pk_send():
-    conn = KakConnection.instance()
+    conn = instance()
     return conn.pk_send
 
 def _min_max_params(f: Callable[..., Any]) -> str:
@@ -325,12 +332,29 @@ def _min_max_params(f: Callable[..., Any]) -> str:
     else:
         return f'{min_params}..{max_params}'
 
+def expose(f: Callable[..., Any], name: str='', once: bool=False):
+    conn = instance()
+    internal_name = f'{name or f.__name__}.{conn.unique()}'
+    if once:
+        def f_once(*args: Any, **kws: Any):
+            del conn.callbacks[internal_name]
+            f(*args, **kws)
+        conn.callbacks[internal_name] = f_once
+    else:
+        conn.callbacks[internal_name] = f
+    script = f'''
+        {conn.pk_write} c {quote(internal_name)} %arg(@);
+        {conn.pk_read_inf};
+        unalias global {conn.pk_done}
+    '''
+    script = ' '.join(script.split())
+    return script
+
 def command(hidden: bool=False, name: str='', override: bool=True):
     def inner(f: Callable[..., Any]):
-        conn = KakConnection.instance()
+        conn = instance()
         exposed_name = name or f.__name__
-        internal_name = f'{exposed_name}.{len(conn.callbacks)}'
-        conn.callbacks[internal_name] = f
+        script = expose(f, exposed_name)
         flags: list[str] = ['-params', _min_max_params(f)]
         if override:
             flags += ['-override']
@@ -340,11 +364,7 @@ def command(hidden: bool=False, name: str='', override: bool=True):
             flags += ['-docstring', quote(f.__doc__)]
         switches = ' '.join(flags)
         conn.kak_socket.send(f'''
-            def {switches} {exposed_name} %(
-                {conn.pk_write} c {internal_name} %arg(@)
-                {conn.pk_read_inf}
-                unalias global {conn.pk_done}
-            )
+            def {switches} {exposed_name} {quote(script)}
         ''')
     return inner
 
@@ -352,8 +372,8 @@ cmd = command()
 
 def map(key: str, mode: str='normal', scope: str='global'):
     def inner(f: Callable[..., Any]):
-        conn = KakConnection.instance()
-        name = f'pk{conn.pk_count}-map-{len(conn.callbacks)}'
+        conn = instance()
+        name = f'pk{conn.pk_count}-map-{conn.unique()}'
         command(hidden=True, name=name)(f)
         flags: list[str] = []
         if f.__doc__:
@@ -366,9 +386,8 @@ def map(key: str, mode: str='normal', scope: str='global'):
 
 def hook(hook_name: str, filter: str='.*', scope: str='global', always: bool=False, once: bool=False, group: str=''):
     def inner(f: Callable[..., Any]):
-        conn = KakConnection.instance()
-        name = f'pk{conn.pk_count}-{hook_name}-{len(conn.callbacks)}'
-        command(hidden=True, name=name)(f)
+        conn = instance()
+        script = expose(f, name=hook_name, once=once)
         flags: list[str] = []
         if group:
             flags += ['-group', group]
@@ -378,7 +397,12 @@ def hook(hook_name: str, filter: str='.*', scope: str='global', always: bool=Fal
             flags += ['-always']
         switches = ' '.join(flags)
         conn.kak_socket.send(f'''
-            hook {switches} {scope} {hook_name} {quote(filter)} {name}
+            hook {switches} {scope} {hook_name} {quote(filter)} {quote(script)}
         ''')
     return inner
 
+def do(client: Union[None, str] = None):
+    def inner(f: Callable[..., Any]):
+        script = expose(f, once=True)
+        keval_async(script, client=client)
+    return inner
