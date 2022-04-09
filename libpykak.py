@@ -277,6 +277,9 @@ class KakConnection:
         Thread(target=conn.serve, daemon=False).start()
         return conn
 
+def init(kak_session: str):
+    return KakConnection.init(kak_session)
+
 def getter(prefix: str):
     def getter_impl(name: str):
         conn = KakConnection.instance()
