@@ -16,8 +16,7 @@ def supertest %{
 }
 
 bg-python -u -c 'if 1:
-    import libpykak
-    k = libpykak.init()
+    from libpykak import k, q
 
     @k.cmd
     def history_test(a=1, b=2, c=3, d=4):
