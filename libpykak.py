@@ -15,18 +15,46 @@ import time
 import traceback
 
 from kak_socket import KakSocket
+import re
 
-def unquote(s: str) -> list[str]:
-    return shlex.split(s)
+class Quoter:
+    def quote_one(self, arg: str | int):
+        arg = str(arg)
+        if re.match(r'^[\w-]+$', arg):
+            return arg
+        else:
+            return "'" + arg.replace("'", "''") + "'"
 
-def quote(v: str | list[str]) -> str:
-    def quote_impl(s: str) -> str:
-        q = "'"
-        return q + s.replace(q, q + q) + q
-    if isinstance(v, str):
-        return quote_impl(v)
-    else:
-        return ' '.join(quote_impl(s) for s in v)
+    def __call__(self, *args: str | int):
+        return ' '.join(self.quote_one(v) for v in args )
+
+    def unquote(self, s: str) -> list[str]:
+        return shlex.split(s)
+
+    def __getattr__(self, name: str):
+        def inner(*args: str | int):
+            return self(name, *args)
+        return inner
+
+    def eval(self, *cmds: str):
+        return '\n'.join(cmds)
+
+    def flags(self, d: dict[str, str | int | bool | None]={}, **kws: str | int | bool | None):
+        xs: list[str] = []
+        for k, v in {**d, **kws}.items():
+            if v is True:
+                xs += [f'-{k}']
+            elif v is None:
+                pass
+            elif v is False:
+                pass
+            elif v == '':
+                pass
+            else:
+                xs += [f'-{k}', str(v)]
+        return xs
+
+q = Quoter()
 
 lib = '''
     decl -hidden str pk_fifo_a
@@ -97,6 +125,8 @@ class _KakConnectionState:
     serving_thread: Thread = cast(Any, None)
     heartbeat_received: bool = False
 
+from typing import ParamSpec, TypeVar, ClassVar
+
 @dataclass(frozen=True)
 class KakConnection:
     kak_socket: KakSocket
@@ -110,12 +140,8 @@ class KakConnection:
     callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
     unique: UniqueSupply = field(default_factory=UniqueSupply)
 
-    quote = property(lambda self: quote)
-
     @property
-    def unquote(self): return unquote
-
-    pk_done = property(lambda self: self._replace_with_pk_count('pk_done'))
+    def pk_done(self) -> str: return self._replace_with_pk_count('pk_done')
 
     @property
     def pk_send(self) -> str: return self._replace_with_pk_count('pk_send')
@@ -131,13 +157,14 @@ class KakConnection:
 
     def keval_async(self, cmd: str, client: str | None=None):
         if client:
-            cmd = f'eval -client {quote(client)} {quote(cmd)}'
+            cmd = f'eval -client {q(client)} {q(cmd)}'
         Thread(target=lambda: self.kak_socket.send(cmd), daemon=True).start()
 
-    def keval(self, cmd: str, client: str | None=None) -> list[list[str]]:
+    def keval(self, *cmds: str, client: str | None=None) -> list[list[str]]:
         assert threading.current_thread() == self._state.serving_thread
+        cmd = '\n'.join(cmds)
         if client:
-            cmd = f'eval -client {quote(client)} {quote(cmd)}'
+            cmd = f'eval -client {q(client)} {q(cmd)}'
         self.write(cmd)
         replies: list[list[str]] = []
         while True:
@@ -162,10 +189,10 @@ class KakConnection:
         except Exception as e:
             exc = traceback.format_exc()
             self.keval('\n'.join([
-                f'echo -markup {{Error}} pykak error {quote(str(e))}: see *debug* buffer'
-                f'echo -debug libpykak error {quote(str(e))}'
+                f'echo -markup {{Error}} pykak error {q(str(e))}: see *debug* buffer'
+                f'echo -debug libpykak error {q(str(e))}'
             ] + [
-                f'echo -debug {quote(line)}'
+                f'echo -debug {q(line)}'
                 for line in exc.splitlines()
             ]))
         finally:
@@ -177,7 +204,7 @@ class KakConnection:
 
     def read(self) -> tuple[str, list[str]]:
         with open(self._state.kak2py_a, 'r') as f:
-            dtype, *data = unquote(f.read())
+            dtype, *data = q.unquote(f.read())
         self._state.kak2py_a, self._state.kak2py_b = self._state.kak2py_b, self._state.kak2py_a
         return (dtype, data)
 
@@ -283,7 +310,7 @@ class KakConnection:
         else:
             self.callbacks[internal_name] = f
         script = f'''
-            {self.pk_write} c {quote(internal_name)} %arg(@);
+            {self.pk_write} c {q(internal_name)} %arg(@);
             {self.pk_read_inf};
             unalias global {self.pk_done}
         '''
@@ -294,19 +321,17 @@ class KakConnection:
         def inner(f: Callable[..., Any]):
             exposed_name = name or f.__name__
             script = self.expose(f, exposed_name)
-            flags: list[str] = ['-params', _min_max_params(f)]
-            if override:
-                flags += ['-override']
-            if hidden:
-                flags += ['-hidden']
-            if f.__doc__:
-                flags += ['-docstring', quote(f.__doc__)]
-            switches = ' '.join(flags)
-            self.kak_socket.send(f'''
-                def {switches} {exposed_name} {quote(script)}
-            ''')
+            flags = q.flags(
+                params = _min_max_params(f),
+                override = override,
+                hidden = hidden,
+                docstring = f.__doc__
+            )
+            self.kak_socket.send(
+                q('def', *flags, exposed_name, script)
+            )
             def call(*args: Any, client: str | None=None, mode: Literal['auto', 'sync', 'async'] = 'auto'):
-                script = ' '.join(self.quote(str(w)) for w in [exposed_name, *args])
+                script = ' '.join(q(str(w)) for w in [exposed_name, *args])
                 sync: bool = mode == 'sync'
                 if mode == 'auto':
                     sync = threading.current_thread() == self._state.serving_thread
@@ -326,7 +351,7 @@ class KakConnection:
             self.command(hidden=True, name=name)(f)
             flags: list[str] = []
             if f.__doc__:
-                flags += ['-docstring', quote(f.__doc__)]
+                flags += ['-docstring', q(f.__doc__)]
             switches = ' '.join(flags)
             self.kak_socket.send(f'''
                 map {switches} {scope} {mode} {key} ': {name}<ret>'
@@ -345,7 +370,7 @@ class KakConnection:
                 flags += ['-always']
             switches = ' '.join(flags)
             self.kak_socket.send(f'''
-                hook {switches} {scope} {hook_name} {quote(filter)} {quote(script)}
+                hook {switches} {scope} {hook_name} {q(filter)} {q(script)}
             ''')
         return inner
 

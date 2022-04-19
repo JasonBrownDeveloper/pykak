@@ -1,4 +1,4 @@
-from libpykak import k
+from libpykak import k, q
 import random
 
 i = 0
@@ -7,10 +7,10 @@ i = 0
 def echo_test():
     global i
     i += 1
-    k.keval(f"echo -debug hello world {i}")
-    k.keval(f"echo hello world {i}")
     k.keval(
-        "info " + k.quote(f"hello world {i}"),
+        f"echo -debug hello world {i}",
+        f"echo hello world {i}",
+        q.info(f'hello world {i}'),
         client=random.sample(k.valq('client_list'), 1)[0]
     )
 

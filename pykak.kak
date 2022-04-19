@@ -18,7 +18,7 @@ def bg-python -params .. %{
 }
 
 bg-python -u -c %{if 1:
-    from libpykak import k
+    from libpykak import k, q
     import functools
     import textwrap
 
@@ -32,8 +32,6 @@ bg-python -u -c %{if 1:
         val valq
         keval
         keval_async
-        quote
-        unquote
         pk_send
     """.split()
 
@@ -44,6 +42,7 @@ bg-python -u -c %{if 1:
 
     Globals["k"] = k.keval
     Globals["ka"] = k.keval_async
+    Globals["q"] = q
 
     @k.cmd
     def python(*args):

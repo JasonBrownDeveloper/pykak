@@ -1,7 +1,7 @@
 def test %{
     python %{
-        keval('echo -debug -- ' + quote(str(valq('selections'))))
-        keval('info -- ' + quote(str(valq('selections'))))
+        keval('echo -debug -- ' + q(str(valq('selections'))))
+        keval('info -- ' + q(str(valq('selections'))))
     }
 }
 test
@@ -23,7 +23,7 @@ bg-python -u -c 'if 1:
     def history_test(a=1, b=2, c=3, d=4):
         "test something"
         u = k.keval(k.pk_send + " %val{history}")
-        k.keval("echo -- " + k.quote(f"{a} {b} {c} {d} {u}"))
+        k.keval("echo -- " + q(f"{a} {b} {c} {d} {u}"))
 
     i = 0
     @k.map(key="i", mode="user")
