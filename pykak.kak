@@ -1,49 +1,57 @@
-def sh-bg -params 1 %{
+def bg-shell -params .. %{
     nop %sh{
         export kak_session
         (
             {
-                eval "$1"
+                header=">>> $1 [$$]: "
+                kakquote() { printf "%s" "$*" | sed "s/'/''/g; 1s/^/'/; \$s/\$/'/"; }
+                "$@" 2>&1 | while IFS=$'\n' read line; do
+                    printf '%s\n' "echo -debug -- $(kakquote "$header$line")" | kak -p "$kak_session"
+                done &
             } &
         ) >/dev/null 2>&1 </dev/null
     }
 }
 
-sh-bg %{
-    python -u -c 'if 1:
-        import libpykak as k
-        import functools
-        import textwrap
+def bg-python -params .. %{
+    bg-shell python %arg{@}
+}
 
-        @functools.lru_cache(maxsize=128)
-        def _compile_code(code: str):
-            return compile(code, "<string>", "exec")
+bg-python -u -c %{if 1:
+    from libpykak import k
+    import functools
+    import textwrap
 
-        api = """
-            opt optq
-            reg regq
-            val valq
-            k  keval
-            ka keval_async
-            quote
-            unquote
-        """.split()
+    @functools.lru_cache(maxsize=128)
+    def _compile_code(code: str):
+        return compile(code, "<string>", "exec")
 
-        Globals = {
-            name: getattr(k, name)
-            for name in api
-        }
+    api = """
+        opt optq
+        reg regq
+        val valq
+        keval
+        keval_async
+        quote
+        unquote
+        pk_send
+    """.split()
 
-        Globals["pk_send"] = k.pk_send()
+    Globals = {
+        name: getattr(k, name)
+        for name in api
+    }
 
-        @k.cmd
-        def python(*args):
-            "evaluate in python"
-            args = list(args)
-            code = args.pop()
-            code = textwrap.dedent(code)
-            exec(_compile_code(code), Globals, {"args": args})
+    Globals["k"] = k.keval
+    Globals["ka"] = k.keval_async
 
-        k.keval_async("alias global py python")
-    '
+    @k.cmd
+    def python(*args):
+        "evaluate in python"
+        args = list(args)
+        code = args.pop()
+        code = textwrap.dedent(code)
+        exec(_compile_code(code), Globals, {"args": args})
+
+    k.keval_async("alias global py python")
 }
