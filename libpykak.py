@@ -1,32 +1,28 @@
 from __future__ import annotations
+from dataclasses import dataclass, field
+from inspect import signature
 from pathlib import Path
-from typing import Callable, Any, Union, ClassVar
-from inspect import signature
 from threading import Thread
-from inspect import signature
-import shlex
-import functools
-import itertools
-import kak_socket
+from typing import Any, cast, Callable, Literal
 import os
-import queue
-import re
 import select
+import shlex
 import shutil
 import signal
-import sys
-import textwrap
+import tempfile
 import threading
 import time
 import traceback
-import tempfile
+
+from kak_socket import KakSocket
 
 def unquote(s: str) -> list[str]:
     return shlex.split(s)
 
-def quote(v: Union[str, list[str]]) -> str:
+def quote(v: str | list[str]) -> str:
     def quote_impl(s: str) -> str:
-        return "'%s'" % s.replace("'", "''")
+        q = "'"
+        return q + s.replace(q, q + q) + q
     if isinstance(v, str):
         return quote_impl(v)
     else:
@@ -86,13 +82,6 @@ lib += '\n'.join(_gen_read_cmds())
 class KakException(Exception):
     pass
 
-from dataclasses import dataclass, field
-from typing import Union
-from itertools import cycle
-
-from kak_socket import KakSocket
-from typing import Any, cast
-
 @dataclass(frozen=False)
 class UniqueSupply:
     _next_unique: int = 0
@@ -121,39 +110,35 @@ class KakConnection:
     callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
     unique: UniqueSupply = field(default_factory=UniqueSupply)
 
-    @property
-    def quote(self): return quote
+    quote = property(lambda self: quote)
 
     @property
     def unquote(self): return unquote
 
-    @property
-    def pk_write(self) -> str:
-        return self._replace_with_pk_count('pk_write')
+    pk_done = property(lambda self: self._replace_with_pk_count('pk_done'))
 
     @property
-    def pk_done(self) -> str:
-        return self._replace_with_pk_count('pk_done')
+    def pk_send(self) -> str: return self._replace_with_pk_count('pk_send')
 
     @property
-    def pk_read_inf(self) -> str:
-        return self._replace_with_pk_count('pk_read_inf')
+    def pk_write(self) -> str: return self._replace_with_pk_count('pk_write')
 
     @property
-    def pk_send(self) -> str:
-        return self._replace_with_pk_count('pk_send')
+    def pk_read_inf(self) -> str: return self._replace_with_pk_count('pk_read_inf')
 
     def _replace_with_pk_count(self, s: str) -> str:
         return s.replace('pk_', f'pk{self.pk_count}_')
 
-    def keval_async(self, cmd: str, client: Union[str, None]=None):
+    def keval_async(self, cmd: str, client: str | None=None):
         if client:
-            cmd = 'eval -client %s %s' % (client, quote(cmd))
-        self.kak_socket.send(cmd)
+            cmd = f'eval -client {quote(client)} {quote(cmd)}'
+        Thread(target=lambda: self.kak_socket.send(cmd), daemon=True).start()
 
-    def keval(self, response: str) -> list[list[str]]:
+    def keval(self, cmd: str, client: str | None=None) -> list[list[str]]:
         assert threading.current_thread() == self._state.serving_thread
-        self.write(response)
+        if client:
+            cmd = f'eval -client {quote(client)} {quote(cmd)}'
+        self.write(cmd)
         replies: list[list[str]] = []
         while True:
             dtype, data = self.read()
@@ -177,18 +162,18 @@ class KakConnection:
         except Exception as e:
             exc = traceback.format_exc()
             self.keval('\n'.join([
-                'echo -markup "{Error}{\\}pykak error %s: see *debug* buffer"' % quote(str(e)),
-                "echo -debug pykak error %s" % quote(str(e))
+                f'echo -markup {{Error}} pykak error {quote(str(e))}: see *debug* buffer'
+                f'echo -debug libpykak error {quote(str(e))}'
             ] + [
-                "echo -debug %s" % quote(line)
+                f'echo -debug {quote(line)}'
                 for line in exc.splitlines()
             ]))
         finally:
             self.write(f'alias global {self.pk_done} nop')
 
-    def write(self, response: str):
+    def write(self, cmd: str):
         with open(self.py2kak, 'w') as f:
-            f.write(response)
+            f.write(cmd)
 
     def read(self) -> tuple[str, list[str]]:
         with open(self._state.kak2py_a, 'r') as f:
@@ -201,8 +186,8 @@ class KakConnection:
         if not kak_pid:
             raise ValueError('kak pid not known')
         if hasattr(os, 'pidfd_open'):
-            fd = os.pidfd_open(kak_pid)
-            select.select([fd], [], [])
+            fd = os.pidfd_open(kak_pid)  # type: ignore
+            select.select([fd], [], [])  # type: ignore
         elif hasattr(select, 'kqueue'):
             kq = select.kqueue()                                      # type: ignore
             kq.control([select.kevent(kak_pid, select.KQ_FILTER_PROC, # type: ignore
@@ -320,11 +305,20 @@ class KakConnection:
             self.kak_socket.send(f'''
                 def {switches} {exposed_name} {quote(script)}
             ''')
+            def call(*args: Any, client: str | None=None, mode: Literal['auto', 'sync', 'async'] = 'auto'):
+                script = ' '.join(self.quote(str(w)) for w in [exposed_name, *args])
+                sync: bool = mode == 'sync'
+                if mode == 'auto':
+                    sync = threading.current_thread() == self._state.serving_thread
+                if sync:
+                    self.keval(script, client=client)
+                else:
+                    self.keval_async(script, client=client)
+            return call
         return inner
 
     @property
-    def cmd(self):
-        return self.command()
+    def cmd(self): return self.command()
 
     def map(self, key: str, mode: str='normal', scope: str='global'):
         def inner(f: Callable[..., Any]):
@@ -355,7 +349,7 @@ class KakConnection:
             ''')
         return inner
 
-    def do(self, client: Union[None, str] = None):
+    def do(self, client: None | str = None):
         def inner(f: Callable[..., Any]):
             script = self.expose(f, once=True)
             self.keval_async(script, client=client)
@@ -382,16 +376,17 @@ class KakConnection:
     def ka(self): return self.keval_async
 
 def init(kak_session: str=os.environ.get('kak_session', '')):
-    assert kak_session
+    assert kak_session, 'Environment variable kak_session not set!'
     return KakConnection.init(kak_session)
 
 @dataclass(frozen=False)
 class LazyConnection:
-    k: Union[KakConnection, None] = None
+    _k: KakConnection | None = None
     def __getattr__(self, name: str):
-        if not self.k:
-            self.k = k = init()
-        return getattr(self.k, name)
+        global k
+        if not self._k:
+            self._k = k = init()
+        return getattr(self._k, name)
 
 k: KakConnection = cast(Any, LazyConnection())
 
