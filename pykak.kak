@@ -1,4 +1,4 @@
-def bg-shell -params .. %{
+def fork-shell -params .. %{
     nop %sh{
         export kak_session
         (
@@ -13,11 +13,11 @@ def bg-shell -params .. %{
     }
 }
 
-def bg-python -params .. %{
-    bg-shell python %arg{@}
+def fork-python -params .. %{
+    fork-shell python %arg{@}
 }
 
-bg-python -u -c %{if 1:
+fork-python -u -c %{if 1:
     from libpykak import k, q
     import functools
     import textwrap

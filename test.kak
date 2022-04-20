@@ -15,7 +15,7 @@ def supertest %{
     }
 }
 
-bg-python -u -c 'if 1:
+fork-python -u -c 'if 1:
     from libpykak import k, q
 
     @k.cmd
@@ -32,3 +32,4 @@ bg-python -u -c 'if 1:
         i += 1
         k.keval(f"info {i}")
 '
+

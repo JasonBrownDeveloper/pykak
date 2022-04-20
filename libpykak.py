@@ -2,9 +2,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from inspect import signature
 from pathlib import Path
+from queue import Queue
 from threading import Thread
 from typing import Any, cast, Callable, Literal
 import os
+import re
 import select
 import shlex
 import shutil
@@ -15,7 +17,6 @@ import time
 import traceback
 
 from kak_socket import KakSocket
-import re
 
 class Quoter:
     def quote_one(self, arg: str | int):
@@ -23,32 +24,42 @@ class Quoter:
         if re.match(r'^[\w-]+$', arg):
             return arg
         else:
-            return "'" + arg.replace("'", "''") + "'"
+            c = "'"
+            return c + arg.replace(c, c + c) + c
 
-    def __call__(self, *args: str | int):
-        return ' '.join(self.quote_one(v) for v in args )
+    def quote_many(self, *args: str | int):
+        return ' '.join(self.quote_one(v) for v in args)
 
-    def unquote(self, s: str) -> list[str]:
-        return shlex.split(s)
+    def quote_call(self, name: str, *args: str | int, **kws: str | int | bool | None):
+        return self.quote_many(name, *self._flags_unquoted(**kws), *args)
 
-    def __getattr__(self, name: str):
-        def inner(*args: str | int):
-            return self(name, *args)
+    __call__ = quote_many
+
+    def __getitem__(self, name: str):
+        def inner(*args: str | int, **kws: str | int | bool | None):
+            return self.quote_call(name, *args, **kws)
         return inner
 
-    def eval(self, *cmds: str):
-        return '\n'.join(cmds)
+    __getattr__ = __getitem__
 
-    def flags(self, d: dict[str, str | int | bool | None]={}, **kws: str | int | bool | None):
+    def eval(self, *cmds: str, **kws: str | int | bool | None):
+        flags = self._flags_unquoted(**kws)
+        if len(cmds) == 1 and not flags:
+            return cmds[0]
+        else:
+            return self.quote_many('eval', *flags, '\n'.join(cmds))
+
+    def flags(self, **kws: str | int | bool | None) -> str:
+        return self.quote_many(*self._flags_unquoted(**kws))
+
+    def _flags_unquoted(self, **kws: str | int | bool | None) -> list[str]:
         xs: list[str] = []
-        for k, v in {**d, **kws}.items():
+        for k, v in kws.items():
             if v is True:
                 xs += [f'-{k}']
             elif v is None:
                 pass
             elif v is False:
-                pass
-            elif v == '':
                 pass
             else:
                 xs += [f'-{k}', str(v)]
@@ -125,8 +136,6 @@ class _KakConnectionState:
     serving_thread: Thread = cast(Any, None)
     heartbeat_received: bool = False
 
-from typing import ParamSpec, TypeVar, ClassVar
-
 @dataclass(frozen=True)
 class KakConnection:
     kak_socket: KakSocket
@@ -155,32 +164,35 @@ class KakConnection:
     def _replace_with_pk_count(self, s: str) -> str:
         return s.replace('pk_', f'pk{self.pk_count}_')
 
-    def keval_async(self, cmd: str, client: str | None=None):
-        if client:
-            cmd = f'eval -client {q(client)} {q(cmd)}'
-        Thread(target=lambda: self.kak_socket.send(cmd), daemon=True).start()
-
     def keval(self, *cmds: str, client: str | None=None) -> list[list[str]]:
         assert threading.current_thread() == self._state.serving_thread
-        cmd = '\n'.join(cmds)
-        if client:
-            cmd = f'eval -client {q(client)} {q(cmd)}'
-        self.write(cmd)
+        cmd = q.eval(*cmds, client=client)
+        self._write(cmd)
         replies: list[list[str]] = []
         while True:
-            dtype, data = self.read()
+            dtype, data = self._read()
             if dtype == 'a':
                 return replies
             elif dtype == 'd':
                 replies.append(data)
             elif dtype == 'c':
-                self.process_call(*data)
+                self._process_call(*data)
             elif dtype == 'e':
                 raise KakException(data[0])
             else:
                 raise Exception('invalid reply type "%s"' % dtype)
 
-    def process_call(self, internal_name: str, *args: Any):
+    async_queue: Queue[str] = field(default_factory=Queue)
+
+    def keval_async(self, cmd: str, client: str | None=None):
+        cmd = q.eval(cmd, client=client)
+        self.async_queue.put_nowait(cmd)
+
+    def _async_waiter(self):
+        while cmd := self.async_queue.get():
+            self.kak_socket.send(cmd)
+
+    def _process_call(self, internal_name: str, *args: Any):
         try:
             f = self.callbacks[internal_name]
             f(*args)
@@ -188,27 +200,30 @@ class KakConnection:
             raise
         except Exception as e:
             exc = traceback.format_exc()
-            self.keval('\n'.join([
-                f'echo -markup {{Error}} pykak error {q(str(e))}: see *debug* buffer'
-                f'echo -debug libpykak error {q(str(e))}'
-            ] + [
-                f'echo -debug {q(line)}'
-                for line in exc.splitlines()
-            ]))
+            self.keval(
+                f'''
+                    echo -markup {{Error}}libpykak error {q(str(e))}: see *debug* buffer
+                    echo -debug libpykak error {q(str(e))}
+                ''',
+                *[
+                    f'echo -debug {q(line)}'
+                    for line in exc.splitlines()
+                ]
+            )
         finally:
-            self.write(f'alias global {self.pk_done} nop')
+            self._write(f'alias global {self.pk_done} nop')
 
-    def write(self, cmd: str):
+    def _write(self, cmd: str):
         with open(self.py2kak, 'w') as f:
             f.write(cmd)
 
-    def read(self) -> tuple[str, list[str]]:
+    def _read(self) -> tuple[str, list[str]]:
         with open(self._state.kak2py_a, 'r') as f:
-            dtype, *data = q.unquote(f.read())
+            dtype, *data = shlex.split(f.read())
         self._state.kak2py_a, self._state.kak2py_b = self._state.kak2py_b, self._state.kak2py_a
-        return (dtype, data)
+        return dtype, data
 
-    def kak_exit_waiter(self):
+    def _exit_waiter(self):
         kak_pid = self.kak_pid
         if not kak_pid:
             raise ValueError('kak pid not known')
@@ -233,13 +248,14 @@ class KakConnection:
 
     def serve(self):
         self._state.serving_thread = threading.current_thread()
-        Thread(target=self.kak_exit_waiter, daemon=True).start()
+        Thread(target=self._exit_waiter, daemon=True).start()
+        Thread(target=self._async_waiter, daemon=True).start()
 
         try:
             while True:
-                dtype, data = self.read()
+                dtype, data = self._read()
                 if dtype == 'c':
-                    self.process_call(*data)
+                    self._process_call(*data)
                 elif dtype == 'f':
                     break
                 elif dtype == 'h':
@@ -327,9 +343,9 @@ class KakConnection:
                 hidden = hidden,
                 docstring = f.__doc__
             )
-            self.kak_socket.send(
-                q('def', *flags, exposed_name, script)
-            )
+            self.kak_socket.send(f'''
+                define-command {flags} {q(exposed_name)} {q(script)}
+            ''')
             def call(*args: Any, client: str | None=None, mode: Literal['auto', 'sync', 'async'] = 'auto'):
                 script = ' '.join(q(str(w)) for w in [exposed_name, *args])
                 sync: bool = mode == 'sync'
@@ -349,28 +365,24 @@ class KakConnection:
         def inner(f: Callable[..., Any]):
             name = f'pk{self.pk_count}-map-{self.unique()}'
             self.command(hidden=True, name=name)(f)
-            flags: list[str] = []
-            if f.__doc__:
-                flags += ['-docstring', q(f.__doc__)]
-            switches = ' '.join(flags)
+            flags = q.flags(
+                docstring = f.__doc__
+            )
             self.kak_socket.send(f'''
-                map {switches} {scope} {mode} {key} ': {name}<ret>'
+                map {flags} {scope} {mode} {q(key)} ': {name}<ret>'
             ''')
         return inner
 
     def hook(self, hook_name: str, filter: str='.*', scope: str='global', always: bool=False, once: bool=False, group: str=''):
         def inner(f: Callable[..., Any]):
             script = self.expose(f, name=hook_name, once=once)
-            flags: list[str] = []
-            if group:
-                flags += ['-group', group]
-            if once:
-                flags += ['-once']
-            if always:
-                flags += ['-always']
-            switches = ' '.join(flags)
+            flags = q.flags(
+                group = group,
+                once = once,
+                always = always,
+            )
             self.kak_socket.send(f'''
-                hook {switches} {scope} {hook_name} {q(filter)} {q(script)}
+                hook {flags} {scope} {hook_name} {q(filter)} {q(script)}
             ''')
         return inner
 
