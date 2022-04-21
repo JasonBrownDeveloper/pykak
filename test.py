@@ -7,7 +7,7 @@ i = 0
 def echo_test():
     global i
     i += 1
-    k.keval(
+    k.eval(
         f'echo -debug hello world {i}',
         f'echo hello world {i}',
         q.info(f'hello world {i}'),
@@ -30,6 +30,6 @@ echo_rec(4)
 def count_to(to: str | int):
     print(to)
     for i in range(int(to)):
-        k.keval(f'echo -debug {i+1}')
+        k.eval(f'echo -debug {i+1}')
 
 count_to(10)

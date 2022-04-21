@@ -30,8 +30,6 @@ fork-python -u -c %{if 1:
         opt optq
         reg regq
         val valq
-        keval
-        keval_async
         pk_send
     """.split()
 
@@ -40,8 +38,10 @@ fork-python -u -c %{if 1:
         for name in api
     }
 
-    Globals["k"] = k.keval
-    Globals["ka"] = k.keval_async
+    Globals["keval"] = k.eval_sync
+    Globals["keval_async"] = k.eval_async
+    Globals["k"] = k.eval_sync
+    Globals["ka"] = k.eval_async
     Globals["q"] = q
 
     @k.cmd
@@ -52,5 +52,5 @@ fork-python -u -c %{if 1:
         code = textwrap.dedent(code)
         exec(_compile_code(code), Globals, {"args": args})
 
-    k.keval_async("alias global py python")
+    k.eval("alias global py python")
 }

@@ -21,8 +21,8 @@ fork-python -u -c 'if 1:
     @k.cmd
     def history_test(a=1, b=2, c=3, d=4):
         "test something"
-        u = k.keval(k.pk_send + " %val{history}")
-        k.keval("echo -- " + q(f"{a} {b} {c} {d} {u}"))
+        u = k.eval(k.pk_send + " %val{history}")
+        k.eval("echo -- " + q(f"{a} {b} {c} {d} {u}"))
 
     i = 0
     @k.map(key="i", mode="user")
@@ -30,6 +30,6 @@ fork-python -u -c 'if 1:
         "increment i"
         global i
         i += 1
-        k.keval(f"info {i}")
+        k.eval(f"info {i}")
 '
 
