@@ -10,7 +10,7 @@ def echo_test():
     k.eval(
         f'echo -debug hello world {i}',
         f'echo hello world {i}',
-        q.info(f'hello world {i}'),
+        'info ' + q(f'hello world {i}'),
         client=random.sample(k.valq('client_list'), 1)[0]
     )
 

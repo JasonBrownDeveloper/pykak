@@ -19,7 +19,7 @@ import traceback
 from kak_socket import KakSocket
 
 class Quoter:
-    def quote_one(self, arg: str | int):
+    def quote_one(self, arg: str):
         arg = str(arg)
         if re.match(r'^[\w-]+$', arg):
             return arg
@@ -27,32 +27,28 @@ class Quoter:
             c = "'"
             return c + arg.replace(c, c + c) + c
 
-    def quote_many(self, *args: str | int):
-        return ' '.join(self.quote_one(v) for v in args)
-
-    def quote_call(self, name: str, *args: str | int, **kws: str | int | bool | None):
-        return self.quote_many(name, *self._flags_unquoted(**kws), *args)
+    def quote_many(self, *args: str | list[str], **flags: str | bool | None) -> str:
+        if args and flags:
+            raise ValueError('Cannot use both positional and keyword arguments')
+        elif flags:
+            return self.quote_many(*self.flags(**flags))
+        else:
+            return ' '.join(
+                self.quote_one(v)
+                for arg in args
+                for v in (arg if isinstance(arg, list) else [arg])
+            )
 
     __call__ = quote_many
 
-    def __getitem__(self, name: str):
-        def inner(*args: str | int, **kws: str | int | bool | None):
-            return self.quote_call(name, *args, **kws)
-        return inner
-
-    __getattr__ = __getitem__
-
-    def eval(self, *cmds: str, **kws: str | int | bool | None):
-        flags = self._flags_unquoted(**kws)
-        if len(cmds) == 1 and not flags:
+    def eval(self, *cmds: str, **kws: str | bool | None):
+        flags = self.flags(**kws)
+        if len(cmds) == 1 and flags == ['--']:
             return cmds[0]
         else:
-            return self.quote_many('eval', *flags, '\n'.join(cmds))
+            return q('eval', flags, '\n'.join(cmds))
 
-    def flags(self, **kws: str | int | bool | None) -> str:
-        return self.quote_many(*self._flags_unquoted(**kws))
-
-    def _flags_unquoted(self, **kws: str | int | bool | None) -> list[str]:
+    def flags(self, **kws: str | bool | None) -> list[str]:
         xs: list[str] = []
         for k, v in kws.items():
             if v is True:
@@ -63,7 +59,7 @@ class Quoter:
                 pass
             else:
                 xs += [f'-{k}', str(v)]
-        return xs
+        return xs + ['--']
 
 q = Quoter()
 
@@ -373,7 +369,7 @@ class KakConnection:
         def inner(f: Callable[..., Any]):
             exposed_name = name or f.__name__
             script = self.expose(f, exposed_name)
-            flags = q.flags(
+            flags = q(
                 params = _min_max_params(f),
                 override = override,
                 hidden = hidden,
@@ -396,7 +392,7 @@ class KakConnection:
         def inner(f: Callable[..., Any]):
             name = f'pk{self._conn.pk_count}-map-{self.unique()}'
             self.command(hidden=True, name=name)(f)
-            flags = q.flags(
+            flags = q(
                 docstring = f.__doc__
             )
             self.eval(f'''
@@ -407,7 +403,7 @@ class KakConnection:
     def hook(self, hook_name: str, filter: str='.*', scope: str='global', always: bool=False, once: bool=False, group: str=''):
         def inner(f: Callable[..., Any]):
             script = self.expose(f, name=hook_name, once=once)
-            flags = q.flags(
+            flags = q(
                 group = group,
                 once = once,
                 always = always,
