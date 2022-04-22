@@ -134,34 +134,108 @@ class _KakConnection:
     kak_socket: KakSocket
     py2kak: Path
     pk_dir: Path
-
     pk_count: int
     kak_pid: int
     kak2py_a: Path
     kak2py_b: Path
-    serving_thread: Thread = cast(Any, None)
+    serving_thread: Thread | None = None
     heartbeat_received: bool = False
     callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
     unique: UniqueSupply = field(default_factory=UniqueSupply)
+    async_queue: Queue[str] = field(default_factory=Queue)
 
-    @property
-    def pk_done(self) -> str: return self.replace_with_pk_count('pk_done')
-
-    @property
-    def pk_write(self) -> str: return self.replace_with_pk_count('pk_write')
-
-    @property
-    def pk_read_inf(self) -> str: return self.replace_with_pk_count('pk_read_inf')
-
-    def replace_with_pk_count(self, s: str) -> str:
+    def add_pk_count(self, s: str) -> str:
         return s.replace('pk_', f'pk{self.pk_count}_')
 
     @property
+    def pk_done(self) -> str:
+        return self.add_pk_count('pk_done')
+
+    @property
+    def pk_write(self) -> str:
+        return self.add_pk_count('pk_write')
+
+    @property
+    def pk_read_inf(self) -> str:
+        return self.add_pk_count('pk_read_inf')
+
+    @property
     def pk_send(self) -> str:
-        return self.replace_with_pk_count('pk_send')
+        return self.add_pk_count('pk_send')
+
+    @staticmethod
+    def init(kak_session: str) -> _KakConnection:
+        kak_socket = KakSocket.init(kak_session)
+        pk_dir = Path(tempfile.mkdtemp('.pykak'))
+        init_fifo = pk_dir / 'kak2py_init.fifo'
+        os.mkfifo(init_fifo)
+        init_cmds = f'''
+            try %(
+                set -add global pk_counter 1
+            ) catch %(
+                decl -hidden int pk_counter 0
+            )
+            nop %sh(
+                echo $PPID $kak_opt_pk_counter > {init_fifo}
+            )
+        '''
+        kak_socket.send(init_cmds)
+
+        with open(init_fifo, 'r') as f:
+            values = f.read().split()
+            kak_pid, pk_count = [int(v) for v in values]
+
+        conn = _KakConnection(
+            kak_socket = kak_socket,
+            py2kak     = pk_dir / 'py2kak.fifo',
+            pk_dir     = pk_dir,
+            kak_pid    = kak_pid,
+            pk_count   = pk_count,
+            kak2py_a   = pk_dir / 'kak2py_a.fifo',
+            kak2py_b   = pk_dir / 'kak2py_b.fifo',
+        )
+
+        os.mkfifo(conn.kak2py_a)
+        os.mkfifo(conn.kak2py_b)
+        os.mkfifo(conn.py2kak)
+
+        prelude = f'''
+            {lib}
+            set global pk_fifo_a {conn.kak2py_a}
+            set global pk_fifo_b {conn.kak2py_b}
+            def -hidden pk_read_impl %(eval %file({conn.py2kak}))
+            hook -group pk{conn.pk_count}-stop global KakEnd .* pk_stop
+        '''
+        prelude = conn.add_pk_count(prelude)
+        conn.kak_socket.send(prelude)
+
+        Thread(target=conn.serve, daemon=False).start()
+        return conn
+
+    def in_serving_thread(self):
+        return self.serving_thread == threading.current_thread()
+
+    def serve(self):
+        self.serving_thread = threading.current_thread()
+        Thread(target=self.exit_waiter, daemon=True).start()
+        Thread(target=self.async_waiter, daemon=True).start()
+
+        try:
+            while True:
+                dtype, data = self.read()
+                if dtype == 'c':
+                    self.process_call(*data)
+                elif dtype == 'f':
+                    break
+                elif dtype == 'h':
+                    self.heartbeat_received = True
+        except KeyboardInterrupt:
+            pass
+        finally:
+            shutil.rmtree(self.pk_dir)
 
     def eval_sync(self, *cmds: str, client: str | None=None) -> list[list[str]]:
-        assert threading.current_thread() == self.serving_thread
+        assert self.in_serving_thread()
         cmd = q.eval(*cmds, client=client)
         self.write(cmd)
         replies: list[list[str]] = []
@@ -177,16 +251,6 @@ class _KakConnection:
                 raise KakException(data[0])
             else:
                 raise Exception('invalid reply type "%s"' % dtype)
-
-    async_queue: Queue[str] = field(default_factory=Queue)
-
-    def eval_async(self, cmd: str, client: str | None=None):
-        cmd = q.eval(cmd, client=client)
-        self.async_queue.put_nowait(cmd)
-
-    def async_waiter(self):
-        while cmd := self.async_queue.get():
-            self.kak_socket.send(cmd)
 
     def process_call(self, internal_name: str, *args: Any):
         try:
@@ -219,6 +283,14 @@ class _KakConnection:
         self.kak2py_a, self.kak2py_b = self.kak2py_b, self.kak2py_a
         return dtype, data
 
+    def eval_async(self, cmd: str, client: str | None=None):
+        cmd = q.eval(cmd, client=client)
+        self.async_queue.put_nowait(cmd)
+
+    def async_waiter(self):
+        while cmd := self.async_queue.get():
+            self.kak_socket.send(cmd)
+
     def exit_waiter(self):
         kak_pid = self.kak_pid
         if not kak_pid:
@@ -241,77 +313,6 @@ class _KakConnection:
                     break
 
         os.kill(os.getpid(), signal.SIGINT)
-
-    def in_serving_thread(self):
-        return self.serving_thread == threading.current_thread()
-
-    def serve(self):
-        self.serving_thread = threading.current_thread()
-        Thread(target=self.exit_waiter, daemon=True).start()
-        Thread(target=self.async_waiter, daemon=True).start()
-
-        try:
-            while True:
-                dtype, data = self.read()
-                if dtype == 'c':
-                    self.process_call(*data)
-                elif dtype == 'f':
-                    break
-                elif dtype == 'h':
-                    self.heartbeat_received = True
-        except KeyboardInterrupt:
-            pass
-        finally:
-            shutil.rmtree(self.pk_dir)
-
-    @staticmethod
-    def init(kak_session: str) -> _KakConnection:
-        kak_socket = KakSocket.init(kak_session)
-        pk_dir = Path(tempfile.mkdtemp('.pykak'))
-        init_fifo = pk_dir / 'kak2py_init.fifo'
-        os.mkfifo(init_fifo)
-        init_cmds = f'''
-            try %(
-                set -add global pk_counter 1
-            ) catch %(
-                decl -hidden int pk_counter 0
-            )
-            nop %sh(
-                echo $PPID $kak_opt_pk_counter > {init_fifo}
-            )
-        '''
-        kak_socket.send(init_cmds)
-
-        with open(init_fifo, 'r') as f:
-            values = f.read().split()
-            kak_pid, pk_count = [int(v) for v in values]
-
-        conn = _KakConnection(
-            kak_socket  = kak_socket,
-            py2kak      = pk_dir / 'py2kak.fifo',
-            pk_dir      = pk_dir,
-            kak_pid     = kak_pid,
-            pk_count    = pk_count,
-            kak2py_a = pk_dir / 'kak2py_a.fifo',
-            kak2py_b = pk_dir / 'kak2py_b.fifo',
-        )
-
-        os.mkfifo(conn.kak2py_a)
-        os.mkfifo(conn.kak2py_b)
-        os.mkfifo(conn.py2kak)
-
-        prelude = f'''
-            {lib}
-            set global pk_fifo_a {conn.kak2py_a}
-            set global pk_fifo_b {conn.kak2py_b}
-            def -hidden pk_read_impl %(eval %file({conn.py2kak}))
-            hook -group pk{conn.pk_count}-stop global KakEnd .* pk_stop
-        '''
-        prelude = conn.replace_with_pk_count(prelude)
-        conn.kak_socket.send(prelude)
-
-        Thread(target=conn.serve, daemon=False).start()
-        return conn
 
     def expose(self, f: Callable[..., Any], name: str='', once: bool=False):
         internal_name = f'{name or f.__name__}.{self.unique()}'
@@ -388,7 +389,8 @@ class KakConnection:
         return inner
 
     @property
-    def cmd(self): return self.command()
+    def cmd(self):
+        return self.command()
 
     def map(self, key: str, mode: str='normal', scope: str='global'):
         def inner(f: Callable[..., Any]):
