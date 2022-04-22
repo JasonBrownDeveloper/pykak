@@ -1,7 +1,7 @@
 def test %{
     python %{
-        keval('echo -debug -- ' + q(str(valq('selections'))))
-        keval('info -- ' + q(str(valq('selections'))))
+        keval('echo -debug -- ' + q(str(val.selections)))
+        keval('info -- ' + q(str(val.selections)))
     }
 }
 test

@@ -83,7 +83,7 @@ lib = '''
 
     alias global pk_write pk_write_a
 
-    def -hidden pk_send -params 1.. %{
+    def -hidden pk_send -params .. %{
         pk_write d %arg{@}
     }
 
@@ -124,6 +124,142 @@ class UniqueSupply:
     def __call__(self) -> int:
         self._next_unique += 1
         return self._next_unique - 1
+
+@dataclass(frozen=True)
+class SelectionDesc:
+    anchor_line: int
+    anchor_column: int
+    head_line: int
+    head_column: int
+
+    @staticmethod
+    def parse(s: str):
+        return SelectionDesc(*re.split(r'\D', s))
+
+    def __str__(self):
+        return f'{self.anchor_line}.{self.anchor_column},{self.head_line}.{self.head_column}'
+
+    __repr__ = __str__
+
+@dataclass(frozen=True)
+class WindowRange:
+    line: int
+    column: int
+    height: int
+    width: int
+
+class Value(list[str]):
+    def to_str(self):
+        return ' '.join(self)
+
+    def to_int(self):
+        return int(self.to_str())
+
+    def to_int_list(self) -> list[int]:
+        return [int(v) for v in self.to_str().split()]
+
+    def to_list(self) -> list[str]:
+        return self
+
+    def to_bool(self) -> bool:
+        return self.to_str() == 'true'
+
+    def to_desc(self) -> SelectionDesc:
+        return SelectionDesc.parse(self.to_str())
+
+    def to_descs(self) -> list[SelectionDesc]:
+        return [SelectionDesc.parse(v) for v in self.to_str().split()]
+
+class Getter:
+    conn: KakConnection
+    prefix: str
+
+    def __init__(self, conn: KakConnection, prefix: str):
+        self.conn = conn
+        self.prefix = prefix
+
+    def get(self, name: str):
+        return self.conn.get(self.prefix, name)
+
+    def __getattr__(self, name: str) -> Value:
+        type = self.__class__.__annotations__.get(name)
+        value = self.get(name)
+        if type == 'list[str]':
+            return value.to_list() # type: ignore
+        elif type == 'str':
+            return value.to_str() # type: ignore
+        elif type == 'list[SelectionDesc]':
+            return value.to_desc() # type: ignore
+        elif type == 'SelectionDesc':
+            return value.to_descs() # type: ignore
+        elif type == 'list[int]':
+            return value.to_int_list() # type: ignore
+        elif type == 'int':
+            return value.to_int() # type: ignore
+        elif type == 'bool':
+            return value.to_bool() # type: ignore
+        else:
+            return value
+
+class Val(Getter):
+    def __init__(self, conn: KakConnection):
+        super().__init__(conn, 'val')
+
+    @property
+    def window_range(self) -> WindowRange:
+        return WindowRange(*self.get('window_range').to_int_list())
+
+    buffile: str
+    buf_line_count: int
+    buflist: list[str]
+    bufname: str
+    client_list: list[str]
+    client: str
+    client_pid: int
+    config: str
+    count: int
+    cursor_byte_offset: int
+    cursor_char_column: int
+    cursor_display_column: int
+    cursor_char_value: int
+    cursor_column: int
+    cursor_line: int
+    error: str
+    history: list[str]
+    history_id: int
+    hook_param: str
+    hook_param_capture_1: str
+    hook_param_capture_2: str
+    hook_param_capture_3: str
+    hook_param_capture_4: str
+    hook_param_capture_5: str
+    hook_param_capture_6: str
+    modified: bool
+    object_flags: list[str] # todo: pipe-separated
+    register: str
+    runtime: str
+    select_mode: str
+    selection: str
+    selections: list[str]
+
+    selection_desc: SelectionDesc
+    selections_desc: list[SelectionDesc]
+
+    selections_char_desc: list[SelectionDesc]
+    selections_display_column_desc: list[SelectionDesc]
+    selection_length: int
+    selections_length: list[int]
+    session: str
+    source: str
+    text: str
+    timestamp: int
+
+    uncommitted_modifications: list[str] # +line.column|text
+
+    user_modes: list[str]
+    version: str
+    window_height: int
+    window_width: int
 
 @dataclass(frozen=False)
 class _KakConnection:
@@ -419,19 +555,20 @@ class KakConnection:
             self.eval(script, client=client, mode=mode)
         return inner
 
-    def getter(self, prefix: str, name: str):
-        return self.eval_sync(f'{self._conn.pk_write} d %{prefix}({name})')[0]
+    def get(self, prefix: str, name: str):
+        return Value(self.eval_sync(f'{self.pk_send} %{prefix}({name})')[0])
 
-    def getter1(self, prefix: str, name: str):
-        return ' '.join(self.getter(prefix, name))
+    @property
+    def val(self):
+        return Val(self)
 
-    def opt(self, name: str): return self.getter1('opt', name)
-    def reg(self, name: str): return self.getter1('reg', name)
-    def val(self, name: str): return self.getter1('val', name)
+    @property
+    def opt(self):
+        return Getter(self, 'opt')
 
-    def optq(self, name: str): return self.getter('opt', name)
-    def regq(self, name: str): return self.getter('reg', name)
-    def valq(self, name: str): return self.getter('val', name)
+    @property
+    def reg(self):
+        return Getter(self, 'reg')
 
 init = KakConnection.init
 

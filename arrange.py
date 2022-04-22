@@ -2,12 +2,12 @@ from libpykak import k, q
 
 @k.cmd
 def arrange(dir: str = ''):
-    buflist = k.valq('buflist')
+    buflist = k.val.buflist
     modified = dict(k.eval_sync(
         'eval -buffer * ' + q(k.pk_send, '%val(bufname)', '%val(modified)')
     ))
     buflist = [b for b in buflist if not '*debug' in b]
-    bufname = k.val('bufname')
+    bufname = k.val.bufname
 
     pos = {b: float(i) for i, b in enumerate(buflist)}
 

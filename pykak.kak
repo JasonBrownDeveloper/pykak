@@ -27,9 +27,9 @@ fork-python -u -c %{if 1:
         return compile(code, "<string>", "exec")
 
     api = """
-        opt optq
-        reg regq
-        val valq
+        opt
+        reg
+        val
         pk_send
     """.split()
 
