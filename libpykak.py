@@ -149,117 +149,182 @@ class WindowRange:
     width: int
 
 class Value(list[str]):
-    def to_str(self):
+    def as_str(self) -> str:
         return ' '.join(self)
 
-    def to_int(self):
-        return int(self.to_str())
+    def as_int(self) -> int:
+        return int(self.as_str())
 
-    def to_int_list(self) -> list[int]:
-        return [int(v) for v in self.to_str().split()]
+    def as_int_list(self) -> list[int]:
+        return [int(v) for v in self.as_str().split()]
 
-    def to_list(self) -> list[str]:
+    def as_str_list(self) -> list[str]:
         return self
 
-    def to_bool(self) -> bool:
-        return self.to_str() == 'true'
+    def as_bool(self) -> bool:
+        return self.as_str() == 'true'
 
-    def to_desc(self) -> SelectionDesc:
-        return SelectionDesc.parse(self.to_str())
+    def as_desc(self) -> SelectionDesc:
+        return SelectionDesc.parse(self.as_str())
 
-    def to_descs(self) -> list[SelectionDesc]:
-        return [SelectionDesc.parse(v) for v in self.to_str().split()]
+    def as_descs(self) -> list[SelectionDesc]:
+        return [SelectionDesc.parse(v) for v in self.as_str().split()]
 
-class Getter:
-    conn: KakConnection
-    prefix: str
+    def as_window_range(self) -> WindowRange:
+        return WindowRange(*self.as_int_list())
 
-    def __init__(self, conn: KakConnection, prefix: str):
-        self.conn = conn
-        self.prefix = prefix
+    def as_type(self, type: str):
+        for k, fn in self.__class__.__dict__.items():
+            if k.startswith('as_') and k != 'as_type' and signature(fn).return_annotation == type:
+                return fn(self)
+        return self
 
-    def get(self, name: str):
-        return self.conn.get(self.prefix, name)
+class Registry:
+    _conn: KakConnection
+    _prefix: str
+    _setter_command: str | None
+
+    def __init__(self, conn: KakConnection, prefix: str, setter_command: str | None = None):
+        self._conn = conn
+        self._prefix = prefix
+        self._setter_command = setter_command
 
     def __getattr__(self, name: str) -> Value:
         type = self.__class__.__annotations__.get(name)
-        value = self.get(name)
-        if type == 'list[str]':
-            return value.to_list() # type: ignore
-        elif type == 'str':
-            return value.to_str() # type: ignore
-        elif type == 'list[SelectionDesc]':
-            return value.to_desc() # type: ignore
-        elif type == 'SelectionDesc':
-            return value.to_descs() # type: ignore
-        elif type == 'list[int]':
-            return value.to_int_list() # type: ignore
-        elif type == 'int':
-            return value.to_int() # type: ignore
-        elif type == 'bool':
-            return value.to_bool() # type: ignore
-        else:
-            return value
+        value = self._conn.get(self._prefix, name)
+        return value.as_type(type) # type: ignore
 
-class Val(Getter):
+    def __setattr__(self, name: str, value: Any):
+        if name.startswith('_'):
+            return super().__setattr__(name, value)
+        assert self._setter_command
+        return self._conn.eval(self._setter_command + ' ' + q(name, value))
+
+class Val(Registry):
     def __init__(self, conn: KakConnection):
         super().__init__(conn, 'val')
-
-    @property
-    def window_range(self) -> WindowRange:
-        return WindowRange(*self.get('window_range').to_int_list())
 
     buffile: str
     buf_line_count: int
     buflist: list[str]
     bufname: str
     client_list: list[str]
-    client: str
     client_pid: int
+    client: str
     config: str
     count: int
     cursor_byte_offset: int
     cursor_char_column: int
-    cursor_display_column: int
     cursor_char_value: int
     cursor_column: int
+    cursor_display_column: int
     cursor_line: int
     error: str
-    history: list[str]
     history_id: int
-    hook_param: str
+    history: list[str]
     hook_param_capture_1: str
     hook_param_capture_2: str
     hook_param_capture_3: str
     hook_param_capture_4: str
     hook_param_capture_5: str
     hook_param_capture_6: str
+    hook_param: str
     modified: bool
-    object_flags: list[str] # todo: pipe-separated
+    object_flags: str # pipe-sep
     register: str
     runtime: str
-    select_mode: str
-    selection: str
-    selections: list[str]
-
     selection_desc: SelectionDesc
-    selections_desc: list[SelectionDesc]
-
-    selections_char_desc: list[SelectionDesc]
-    selections_display_column_desc: list[SelectionDesc]
     selection_length: int
+    selections_char_desc: list[SelectionDesc]
+    selections_desc: list[SelectionDesc]
+    selections_display_column_desc: list[SelectionDesc]
     selections_length: list[int]
+    selections: list[str]
+    selection: str
+    select_mode: str
     session: str
     source: str
     text: str
     timestamp: int
-
-    uncommitted_modifications: list[str] # +line.column|text
-
+    uncommitted_modifications: list[str]
     user_modes: list[str]
     version: str
     window_height: int
+    window_range: WindowRange
     window_width: int
+
+class Opt(Registry):
+    def __init__(self, conn: KakConnection):
+        super().__init__(conn, 'opt', 'set-option global')
+
+    aligntab:             bool
+    autocomplete:         str # pipe-sep
+    autoinfo:             str # pipe-sep
+    autoreload:           str
+    BOM:                  str
+    completers:           list[str]
+    debug:                str # pipe-sep
+    disabled_hooks:       str # regex
+    eolformat:            str
+    extra_word_chars:     list[str]
+    filetype:             str
+    fs_check_timeout:     int
+    idle_timeout:         int
+    ignored_files:        str # regex
+    incsearch:            bool
+    indentwidth:          int
+    matching_pairs:       list[str]
+    modelinefmt:          str
+    path:                 list[str]
+    readonly:             bool
+    scrolloff:            str # line,column pair
+    startup_info_version: int
+    static_words:         list[str]
+    tabstop:              int
+    ui_options:           list[str] # str-to-str-map
+    writemethod:          str
+
+class Reg(Registry):
+    def __init__(self, conn: KakConnection):
+        super().__init__(conn, 'reg', 'set-register')
+
+    arobase:    list[str]
+    caret:      list[str] # buffile@timestamp@main_index list[SelectionDesc]
+    colon:      list[str]
+    dot:        list[str]
+    dquote:     list[str]
+    hash:       list[int]
+    percent:    list[str]
+    pipe:       list[str]
+    slash:      list[str]
+    underscore: list[str]
+
+    a: list[str]
+    b: list[str]
+    c: list[str]
+    d: list[str]
+    e: list[str]
+    f: list[str]
+    g: list[str]
+    h: list[str]
+    i: list[str]
+    j: list[str]
+    k: list[str]
+    l: list[str]
+    m: list[str]
+    n: list[str]
+    o: list[str]
+    p: list[str]
+    q: list[str]
+    r: list[str]
+    s: list[str]
+    t: list[str]
+    u: list[str]
+    v: list[str]
+    w: list[str]
+    x: list[str]
+    y: list[str]
+    z: list[str]
 
 @dataclass(frozen=False)
 class _KakConnection:
@@ -564,11 +629,11 @@ class KakConnection:
 
     @property
     def opt(self):
-        return Getter(self, 'opt')
+        return Opt(self)
 
     @property
     def reg(self):
-        return Getter(self, 'reg')
+        return Reg(self)
 
 init = KakConnection.init
 
