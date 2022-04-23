@@ -575,11 +575,19 @@ class KakConnection:
         if self._conn.in_serving_thread():
             return self.eval_sync(*cmds, client=client)
         else:
-            chan = Queue[list[list[str]]]()
+            chan = Queue[list[list[str]] | Exception]()
             @self.do(client=client)
             def sync_up():
-                chan.put_nowait(self.eval_sync(*cmds, client=client))
-            return chan.get()
+                try:
+                    value = self.eval_sync(*cmds, client=client)
+                except Exception as e:
+                    value = e
+                chan.put_nowait(value)
+            res = chan.get()
+            if isinstance(res, Exception):
+                raise res
+            else:
+                return res
 
     @property
     def unique(self):
