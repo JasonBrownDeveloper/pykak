@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from functools import cache
 from inspect import signature
 from pathlib import Path
 from queue import Queue
@@ -149,6 +150,9 @@ class WindowRange:
     width: int
 
 class Value(list[str]):
+    def as_str_list(self) -> list[str]:
+        return self
+
     def as_str(self) -> str:
         return ' '.join(self)
 
@@ -157,9 +161,6 @@ class Value(list[str]):
 
     def as_int_list(self) -> list[int]:
         return [int(v) for v in self.as_str().split()]
-
-    def as_str_list(self) -> list[str]:
-        return self
 
     def as_bool(self) -> bool:
         return self.as_str() == 'true'
@@ -174,10 +175,19 @@ class Value(list[str]):
         return WindowRange(*self.as_int_list())
 
     def as_type(self, type: str):
-        for k, fn in self.__class__.__dict__.items():
-            if k.startswith('as_') and k != 'as_type' and signature(fn).return_annotation == type:
-                return fn(self)
-        return self
+        if fn := self.parsers().get(type):
+            return fn(self)
+        else:
+            return self
+    @classmethod
+    @cache
+    def parsers(cls) -> dict[str, Callable[..., Any]]:
+        return {
+            signature(fn).return_annotation: fn
+            for k, fn in cls.__dict__.items()
+            if k.startswith('as_') and k != 'as_type'
+        }
+
 
 class Registry:
     _conn: KakConnection
@@ -433,7 +443,10 @@ class _KakConnection:
 
     def eval_sync(self, *cmds: str, client: str | None=None) -> list[list[str]]:
         assert self.in_serving_thread()
-        cmd = q.eval(*cmds, client=client)
+        if client:
+            cmd = q.eval(*cmds, client=client)
+        else:
+            cmd = '\n'.join(cmds)
         self.write(cmd)
         replies: list[list[str]] = []
         while True:
@@ -480,8 +493,11 @@ class _KakConnection:
         self.kak2py_a, self.kak2py_b = self.kak2py_b, self.kak2py_a
         return dtype, data
 
-    def eval_async(self, cmd: str, client: str | None=None):
-        cmd = q.eval(cmd, client=client)
+    def eval_async(self, *cmds: str, client: str | None=None):
+        if client:
+            cmd = q.eval(*cmds, client=client)
+        else:
+            cmd = '\n'.join(cmds)
         self.async_queue.put_nowait(cmd)
 
     def async_waiter(self):
@@ -509,7 +525,8 @@ class _KakConnection:
                 if not self.heartbeat_received:
                     break
 
-        os.kill(os.getpid(), signal.SIGINT)
+        # os.kill(os.getpid(), signal.SIGINT)
+        # KeyboardInterrupt -> tells serving thread to die
 
     def expose(self, f: Callable[..., Any], name: str='', once: bool=False):
         internal_name = f'{name or f.__name__}.{self.unique()}'
@@ -533,8 +550,9 @@ class KakConnection:
     _conn: _KakConnection
 
     @staticmethod
-    def init(kak_session: str=os.environ.get('kak_session', '')):
-        assert kak_session, 'Environment variable kak_session not set!'
+    def init(kak_session: str | None = None):
+        if kak_session is None:
+            kak_session = os.environ['kak_session']
         return KakConnection(_KakConnection.init(kak_session))
 
     @property
@@ -552,6 +570,16 @@ class KakConnection:
     @property
     def eval_async(self):
         return self._conn.eval_async
+
+    def eval_sync_up(self, *cmds: str, client: str | None=None) -> list[list[str]]:
+        if self._conn.in_serving_thread():
+            return self.eval_sync(*cmds, client=client)
+        else:
+            chan = Queue[list[list[str]]]()
+            @self.do(client=client)
+            def sync_up():
+                chan.put_nowait(self.eval_sync(*cmds, client=client))
+            return chan.get()
 
     @property
     def unique(self):
@@ -621,7 +649,7 @@ class KakConnection:
         return inner
 
     def get(self, prefix: str, name: str):
-        return Value(self.eval_sync(f'{self.pk_send} %{prefix}({name})')[0])
+        return Value(self.eval_sync_up(f'{self.pk_send} %{prefix}({name})')[0])
 
     @property
     def val(self):
