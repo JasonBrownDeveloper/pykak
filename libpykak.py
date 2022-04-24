@@ -544,6 +544,7 @@ class _KakConnection:
             unalias global {self.pk_done}
         '''
         script = ' '.join(script.split())
+        print(f'exposed {internal_name}')
         return script
 
 @dataclass(frozen=True)
