@@ -239,6 +239,7 @@ class Val(Registry):
     hook_param_capture_5: str
     hook_param_capture_6: str
     hook_param: str
+    key: str
     modified: bool
     object_flags: str # pipe-sep
     register: str
@@ -656,6 +657,14 @@ class KakConnection:
             self.eval(script, client=client, mode=mode)
         return inner
 
+    def on_key(self, f: Callable[[str], Any]):
+        def f_with_key():
+            return f(k.val.key)
+        script = self.expose(f_with_key, once=True)
+        self.eval(f'''
+            on-key {q(script)}
+        ''')
+
     def get(self, prefix: str, name: str):
         return Value(self.eval_sync_up(f'{self.pk_send} %{prefix}({name})')[0])
 
@@ -686,8 +695,8 @@ k: KakConnection = cast(Any, LazyConnection())
 
 def _min_max_params(f: Callable[..., Any]) -> str:
     sig = list(signature(f).parameters.values())
-    kw_only = [p.name for p in sig if p.kind == p.KEYWORD_ONLY]
-    assert not kw_only
+    kw_only = [p.name for p in sig if p.kind == p.KEYWORD_ONLY and p.default == p.empty]
+    assert not kw_only, f'Keyword-only parameters without default values: {kw_only = } ({sig = })'
     params = [p for p in sig if p.kind in [p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD]]
     min_params = len([p for p in params if p.default is p.empty])
     max_params = len(params)
@@ -696,3 +705,4 @@ def _min_max_params(f: Callable[..., Any]) -> str:
         return f'{min_params}..'
     else:
         return f'{min_params}..{max_params}'
+

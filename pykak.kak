@@ -1,22 +1,3 @@
-def fork-shell -params .. %{
-    nop %sh{
-        export kak_session
-        (
-            {
-                header=">>> $1 [$$]: "
-                kakquote() { printf "%s" "$*" | sed "s/'/''/g; 1s/^/'/; \$s/\$/'/"; }
-                "$@" 2>&1 | while IFS=$'\n' read line; do
-                    printf '%s\n' "echo -debug -- $(kakquote "$header$line")" | kak -p "$kak_session"
-                done &
-            } &
-        ) >/dev/null 2>&1 </dev/null
-    }
-}
-
-def fork-python -params .. %{
-    fork-shell python %arg{@}
-}
-
 fork-python -u -c %{if 1:
     from libpykak import k, q
     import functools
