@@ -1,16 +1,24 @@
 def fork-shell -params .. %{
-    eval nop "%%sh{" "# %sh{printf '%s\n' ""$@"" | grep -Po kak_\\w+ | tr -d '\n' }" %{
-        export kak_session
+    try %{
+        decl -hidden str _fork_script
+        decl -hidden str _fork_vars
+    }
+    set global _fork_script %{
+        kakquote() { printf "%s" "$*" | sed "s/'/''/g; 1s/^/'/; \$s/\$/'/"; }
         (
             {
                 header=">>> $1 [$$]: "
-                kakquote() { printf "%s" "$*" | sed "s/'/''/g; 1s/^/'/; \$s/\$/'/"; }
                 "$@" 2>&1 | while IFS=$'\n' read line; do
                     printf '%s\n' "echo -debug -- $(kakquote "$header$line")" | kak -p "$kak_session"
                 done &
             } &
         ) >/dev/null 2>&1 </dev/null
-    } "}"
+    }
+    set global _fork_vars %sh{printf '%s ' "$@" | grep -Po kak_\\w+ | tr '\n' ' '}
+    eval nop "%%sh{
+        # %opt{_fork_vars}
+        %opt{_fork_script}
+    }"
 }
 
 def fork-python -params .. %{
