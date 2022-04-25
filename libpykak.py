@@ -346,11 +346,13 @@ class _KakConnection:
     kak_pid: int
     kak2py_a: Path
     kak2py_b: Path
+    sigint_at_kak_end: bool
     serving_thread: Thread | None = None
     heartbeat_received: bool = False
     callbacks: dict[str, Callable[..., Any]] = field(default_factory=dict)
     unique: UniqueSupply = field(default_factory=UniqueSupply)
     async_queue: Queue[str] = field(default_factory=Queue)
+    kak2py_queue: Queue[list[str]] = field(default_factory=Queue)
 
     def add_pk_count(self, s: str) -> str:
         return s.replace('pk_', f'pk{self.pk_count}_')
@@ -372,7 +374,7 @@ class _KakConnection:
         return self.add_pk_count('pk_send')
 
     @staticmethod
-    def init(kak_session: str) -> _KakConnection:
+    def init(kak_session: str, sigint_at_kak_end: bool = True) -> _KakConnection:
         kak_socket = KakSocket.init(kak_session)
         pk_dir = Path(tempfile.mkdtemp('.pykak'))
         init_fifo = pk_dir / 'kak2py_init.fifo'
@@ -394,13 +396,14 @@ class _KakConnection:
             kak_pid, pk_count = [int(v) for v in values]
 
         conn = _KakConnection(
-            kak_socket = kak_socket,
-            py2kak     = pk_dir / 'py2kak.fifo',
-            pk_dir     = pk_dir,
-            kak_pid    = kak_pid,
-            pk_count   = pk_count,
-            kak2py_a   = pk_dir / 'kak2py_a.fifo',
-            kak2py_b   = pk_dir / 'kak2py_b.fifo',
+            kak_socket   = kak_socket,
+            py2kak       = pk_dir / 'py2kak.fifo',
+            pk_dir       = pk_dir,
+            kak_pid      = kak_pid,
+            pk_count     = pk_count,
+            kak2py_a     = pk_dir / 'kak2py_a.fifo',
+            kak2py_b     = pk_dir / 'kak2py_b.fifo',
+            sigint_at_kak_end = sigint_at_kak_end,
         )
 
         os.mkfifo(conn.kak2py_a)
@@ -427,6 +430,7 @@ class _KakConnection:
         self.serving_thread = threading.current_thread()
         Thread(target=self.exit_waiter, daemon=True).start()
         Thread(target=self.async_waiter, daemon=True).start()
+        Thread(target=self.read_waiter, daemon=True).start()
 
         try:
             while True:
@@ -434,6 +438,7 @@ class _KakConnection:
                 if dtype == 'c':
                     self.process_call(*data)
                 elif dtype == 'f':
+                    print('received f')
                     break
                 elif dtype == 'h':
                     self.heartbeat_received = True
@@ -441,6 +446,8 @@ class _KakConnection:
             pass
         finally:
             shutil.rmtree(self.pk_dir)
+            if self.sigint_at_kak_end:
+                os.kill(os.getpid(), signal.SIGINT)
 
     def eval_sync(self, *cmds: str, client: str | None=None) -> list[list[str]]:
         assert self.in_serving_thread()
@@ -489,10 +496,15 @@ class _KakConnection:
             f.write(cmd)
 
     def read(self) -> tuple[str, list[str]]:
-        with open(self.kak2py_a, 'r') as f:
-            dtype, *data = shlex.split(f.read())
-        self.kak2py_a, self.kak2py_b = self.kak2py_b, self.kak2py_a
+        dtype, *data = self.kak2py_queue.get()
         return dtype, data
+
+    def read_waiter(self):
+        while True:
+            with open(self.kak2py_a, 'r') as f:
+                contents = shlex.split(f.read())
+            self.kak2py_a, self.kak2py_b = self.kak2py_b, self.kak2py_a
+            self.kak2py_queue.put_nowait(contents)
 
     def eval_async(self, *cmds: str, client: str | None=None):
         if client:
@@ -526,8 +538,7 @@ class _KakConnection:
                 if not self.heartbeat_received:
                     break
 
-        # os.kill(os.getpid(), signal.SIGINT)
-        # KeyboardInterrupt -> tells serving thread to die
+        self.kak2py_queue.put_nowait(['f'])
 
     def expose(self, f: Callable[..., Any], name: str='', once: bool=False):
         internal_name = f'{name or f.__name__}.{self.unique()}'
@@ -552,10 +563,10 @@ class KakConnection:
     _conn: _KakConnection
 
     @staticmethod
-    def init(kak_session: str | None = None):
+    def init(kak_session: str | None = None, sigint_at_kak_end: bool = True):
         if kak_session is None:
             kak_session = os.environ['kak_session']
-        return KakConnection(_KakConnection.init(kak_session))
+        return KakConnection(_KakConnection.init(kak_session, sigint_at_kak_end=sigint_at_kak_end))
 
     @property
     def expose(self):
