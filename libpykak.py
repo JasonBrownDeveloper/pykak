@@ -49,6 +49,15 @@ class Quoter:
         else:
             return q('eval', flags, '\n'.join(cmds))
 
+    def debug(self, *strings: str):
+        return q.eval(
+            *[
+                q('echo', line, debug=True)
+                for s in strings
+                for line in s.splitlines()
+            ],
+        )
+
     def flags(self, **kws: str | bool | None) -> list[str]:
         xs: list[str] = []
         for k, v in kws.items():
@@ -493,10 +502,7 @@ class _KakConnection:
                     echo -markup {{Error}}libpykak error {q(str(e))}: see *debug* buffer
                     echo -debug libpykak error {q(str(e))}
                 ''',
-                *[
-                    f'echo -debug {q(line)}'
-                    for line in exc.splitlines()
-                ]
+                q.debug(exc)
             )
         finally:
             self.write(f'alias global {self.pk_done} nop')
