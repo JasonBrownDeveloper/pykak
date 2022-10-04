@@ -696,6 +696,14 @@ class KakConnection:
     def get(self, prefix: str, name: str):
         return Value(self.eval_sync_up(f'{self.pk_send} %{prefix}({name})')[0])
 
+    def pwd(self):
+        '''
+        The server's working directory. Requires bash shell (uses printf %q).
+        '''
+        [quoted_pwd] = self.get('sh', 'printf %q "$PWD"')
+        [unquoted_pwd] = shlex.split(quoted_pwd)
+        return unquoted_pwd
+
     @property
     def val(self):
         return Val(self)
