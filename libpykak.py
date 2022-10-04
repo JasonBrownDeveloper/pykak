@@ -214,6 +214,16 @@ class Val(Registry):
     def __init__(self, conn: KakConnection):
         super().__init__(conn, 'val')
 
+    @property
+    def bufstr(self) -> str:
+        [[value]] = self._conn.eval_sync_up(f'''
+            eval -draft %(
+                exec '%'
+                {self._conn.pk_send} %val(selection)
+            )
+        ''')
+        return value
+
     buffile: str
     buf_line_count: int
     buflist: list[str]
