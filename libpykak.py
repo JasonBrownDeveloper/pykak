@@ -29,10 +29,11 @@ class Quoter:
             return c + arg.replace(c, c + c) + c
 
     def quote_many(self, *args: str | list[str], **flags: str | bool | None) -> str:
-        if args and flags:
-            raise ValueError('Cannot use both positional and keyword arguments')
-        elif flags:
+        if flags and not args:
             return self.quote_many(*self.flags(**flags))
+        elif flags:
+            head, *tail = args
+            return self.quote_many(head, *self.flags(**flags), *tail)
         else:
             return ' '.join(
                 self.quote_one(v)
