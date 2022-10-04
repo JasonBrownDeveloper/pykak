@@ -104,6 +104,14 @@ lib = '''
     def -hidden pk_stop %{
         pk_write f
     }
+
+    def -hidden pk_unregister %{
+        echo -debug pk_unregister start
+        def -override -hidden pk_read_impl 'fail pk_unregister'
+        def -override -hidden pk_write_a 'fail pk_unregister'
+        def -override -hidden pk_write_b 'fail pk_unregister'
+        echo -debug pk_unregister done
+    }
 '''
 
 def _gen_read_cmd(cmd: str, cmds: list[str]):
@@ -438,6 +446,13 @@ class _KakConnection:
         '''
         prelude = conn.add_pk_count(prelude)
         conn.kak_socket.send(prelude)
+
+        def handle_sigterm(*_: Any):
+            # entr sends SIGTERM on reload. unregister write and read to avoid infinite block at fifos
+            print('sending unregister')
+            conn.async_queue.put_nowait(conn.add_pk_count('pk_unregister'))
+            conn.kak2py_queue.put_nowait(['f'])
+        signal.signal(signal.SIGTERM, handle_sigterm)
 
         Thread(target=conn.serve, daemon=False).start()
         return conn
