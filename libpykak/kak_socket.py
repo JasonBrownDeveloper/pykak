@@ -31,6 +31,9 @@ import os
 import socket
 
 from dataclasses import dataclass
+from pathlib import Path
+
+import time
 
 @dataclass(frozen=True)
 class KakSocket:
@@ -39,6 +42,11 @@ class KakSocket:
     @staticmethod
     def init(session: str):
         socket_path = _get_socket_path(session)
+        for _ in range(100):
+            if not Path(socket_path).exists():
+                time.sleep(0.1)
+        if not Path(socket_path).exists():
+            raise FileNotFoundError(socket_path)
         return KakSocket(socket_path=socket_path)
 
     def send(self, cmd: str) -> bool:

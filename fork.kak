@@ -15,6 +15,11 @@ def fork-shell -params .. %{
         ) >/dev/null 2>&1 </dev/null
     }
     set global _fork_vars %sh{printf '%s ' "$@" | grep -Po kak_\\w+ | tr '\n' ' '}
+    echo -debug "
+        fork:
+        # %opt{_fork_vars}
+        %opt{_fork_script}
+    "
     eval nop "%%sh{
         # %opt{_fork_vars}
         %opt{_fork_script}

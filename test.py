@@ -1,44 +1,63 @@
-from subprocess import Popen, DEVNULL
-from unittest.mock import patch
+from queue import Queue
+from typing import *
+from subprocess import Popen, DEVNULL, check_call
 import random
-import sys
+import textwrap
 
-def test_k():
-    kak_session = f'temp_{random.randint(100_000, 999_999)}'
-    cmd = f'kak -s {kak_session} -ui dummy -n'.split()
-    try:
-        with Popen(cmd, stdin=DEVNULL, stderr=DEVNULL, stdout=DEVNULL):
-            with patch.dict('os.environ', kak_session=kak_session):
-                from libpykak import k
-                value = k.val.session
-                print(f'{value = }')
-                assert value == kak_session
-                k.eval_async('kill!')
-            print('waiting... ', end='', flush=True)
-        print('done')
-    except KeyboardInterrupt:
-        print('Received KeyboardInterrupt as expected')
-    else:
-        raise ValueError('Expected keyboard interrupt')
-    finally:
-        del sys.modules['libpykak']
+from libpykak import KakConnection, q
+import pytest
 
-def test_init():
+@pytest.fixture
+def k():
     kak_session = f'temp_{random.randint(100_000, 999_999)}'
     cmd = f'kak -s {kak_session} -ui dummy -n'.split()
     with Popen(cmd, stdin=DEVNULL, stderr=DEVNULL, stdout=DEVNULL):
-        from libpykak import init
-        k = init(kak_session, sigint_at_kak_end=False)
-        value = k.val.session
-        print(f'{value = }')
-        assert value == kak_session
+        k = KakConnection.init(kak_session, sigint_at_kak_end=False)
+        session = k.val.session
+        print(f'{session = }')
+        assert session == kak_session
+        yield k
         k.eval_async('kill!')
-        del sys.modules['libpykak']
         print('waiting... ', end='', flush=True)
-    print('done')
+    # check_call(['kak', '-clear'])
 
-if __name__ == '__main__':
-    test_k()
-    test_k()
-    test_init()
-    test_init()
+def test_sync_up_do(k: KakConnection):
+    queue: Queue[Any] = Queue()
+    clients = k.val.client_list
+    @k.do(client=clients[0], mode='sync_up')
+    def _():
+        k.eval(q('exec', 'ibla<esc>'))
+        assert k.val.bufstr == 'bla\n'
+        queue.put_nowait('do')
+    queue.put_nowait('after')
+    assert queue.get() == 'do'
+    assert queue.get() == 'after'
+
+def test_async_do(k: KakConnection):
+    queue: Queue[Any] = Queue()
+    clients = k.val.client_list
+    @k.do(client=clients[0], mode='async')
+    def _():
+        k.eval(q('exec', 'ibla<esc>'))
+        assert k.val.bufstr == 'bla\n'
+        queue.put_nowait('do')
+    queue.put_nowait('after')
+    assert queue.get() == 'after'
+    assert queue.get() == 'do'
+
+def test_info(k: KakConnection):
+    clients = k.val.client_list
+    @k.do(client=clients[0], mode='sync_up')
+    def _():
+        k.info('bla', 'bli')
+        k.debug('A debug message', 'Another', 1, {'bla': 'beep'})
+    dbg = k.get_buffer('*debug*')
+    assert dbg == textwrap.dedent('''
+        *** This is the debug buffer, where debug info will be written ***
+        A debug message
+        Another
+        1
+        {'bla': 'beep'}
+
+    ''').lstrip()
+    assert k.val.client_list == ['client0']
