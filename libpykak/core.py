@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import traceback
-import tracer
+# import tracer
 
 from .kak_socket import KakSocket
 
