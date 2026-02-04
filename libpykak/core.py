@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from inspect import signature
 from pathlib import Path
-from queue import Queue
+from multiprocessing import Queue
 from threading import Thread
 from typing import Any, cast, Callable, Literal
 import os
@@ -49,6 +49,7 @@ lib = '''
     }
 
     def -hidden pk_stop %{
+        trigger-user-hook pykak_exit
         pk_write f
     }
 
@@ -262,12 +263,10 @@ class CoreKakConnection:
                 if dtype == 'c':
                     self.process_call(*data)
                 elif dtype == 'f':
-                    print('received f, shutting down')
                     break
                 elif dtype == 'h':
                     self.heartbeat_received = True
         except KeyboardInterrupt:
-            print('received sigint')
             pass
         finally:
             shutil.rmtree(self.pk_dir)
@@ -337,7 +336,15 @@ class CoreKakConnection:
         self.async_queue.put_nowait(cmd)
 
     def async_waiter(self):
-        while cmd := self.async_queue.get():
+        while True:
+            try:
+                cmd = self.async_queue.get()
+            except:
+                # The mp.Queue can be GC mid-get()
+                break
+
+            if not cmd:
+                break
             self.kak_socket.send(cmd)
 
     def exit_waiter(self):
